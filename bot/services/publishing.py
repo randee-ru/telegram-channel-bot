@@ -46,3 +46,31 @@ async def publish_message(bot: Bot, channel_id: int, source: Message) -> Message
             "Не удалось опубликовать. Проверьте, что бот — админ канала "
             "с правом публикации сообщений."
         ) from exc
+
+
+async def publish_text(
+    bot: Bot,
+    channel_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+) -> Message:
+    """Publish plain text (or HTML/Markdown) to a channel — for agent API / CLI."""
+    try:
+        sent = await bot.send_message(
+            chat_id=channel_id,
+            text=text,
+            parse_mode=parse_mode,
+        )
+        logger.info(
+            "Published text to channel_id=%s msg_id=%s",
+            channel_id,
+            sent.message_id,
+        )
+        return sent
+    except TelegramAPIError as exc:
+        logger.exception("Publish text failed channel_id=%s", channel_id)
+        raise PublishError(
+            "Не удалось опубликовать. Проверьте, что бот — админ канала "
+            "с правом публикации сообщений."
+        ) from exc

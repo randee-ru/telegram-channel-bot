@@ -1,12 +1,14 @@
-"""SQLite persistence for bound channels and optional reply targets."""
+"""SQLite persistence for bound channels, posts, and agent audit."""
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import AsyncIterator
+from typing import Any
 
 import aiosqlite
 
@@ -20,6 +22,46 @@ class BoundChannel:
     username: str | None
     bound_by: int
     created_at: str
+    is_default: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelPost:
+    id: int
+    channel_id: int
+    message_id: int
+    date: str | None
+    text: str | None
+    caption: str | None
+    media_type: str | None
+    raw_json: str | None
+    created_at: str
+
+
+def _row_to_channel(row: aiosqlite.Row) -> BoundChannel:
+    keys = row.keys()
+    return BoundChannel(
+        channel_id=row["channel_id"],
+        title=row["title"],
+        username=row["username"],
+        bound_by=row["bound_by"],
+        created_at=row["created_at"],
+        is_default=bool(row["is_default"]) if "is_default" in keys else False,
+    )
+
+
+def _row_to_post(row: aiosqlite.Row) -> ChannelPost:
+    return ChannelPost(
+        id=row["id"],
+        channel_id=row["channel_id"],
+        message_id=row["message_id"],
+        date=row["date"],
+        text=row["text"],
+        caption=row["caption"],
+        media_type=row["media_type"],
+        raw_json=row["raw_json"],
+        created_at=row["created_at"],
+    )
 
 
 class Database:
@@ -48,7 +90,8 @@ class Database:
                     title TEXT,
                     username TEXT,
                     bound_by INTEGER NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    is_default INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS reply_targets (
@@ -59,10 +102,47 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     UNIQUE(chat_id, message_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS channel_posts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    date TEXT,
+                    text TEXT,
+                    caption TEXT,
+                    media_type TEXT,
+                    raw_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(channel_id, message_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    payload_json TEXT,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_channel_posts_channel_date
+                    ON channel_posts(channel_id, date DESC);
                 """
             )
+            await self._migrate(db)
             await db.commit()
         logger.info("Database initialized at %s", self.path)
+
+    async def _migrate(self, db: aiosqlite.Connection) -> None:
+        """Safe additive migrations for existing DBs."""
+        cols = {
+            r[1]
+            for r in await (await db.execute("PRAGMA table_info(channels)")).fetchall()
+        }
+        if "is_default" not in cols:
+            await db.execute(
+                "ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated channels: added is_default")
 
     async def upsert_channel(
         self,
@@ -92,30 +172,15 @@ class Database:
                 )
             ).fetchone()
         assert row is not None
-        return BoundChannel(
-            channel_id=row["channel_id"],
-            title=row["title"],
-            username=row["username"],
-            bound_by=row["bound_by"],
-            created_at=row["created_at"],
-        )
+        return _row_to_channel(row)
 
     async def list_channels(self) -> list[BoundChannel]:
         async with self.connection() as db:
             cursor = await db.execute(
-                "SELECT * FROM channels ORDER BY created_at ASC, channel_id ASC"
+                "SELECT * FROM channels ORDER BY is_default DESC, created_at ASC, channel_id ASC"
             )
             rows = await cursor.fetchall()
-        return [
-            BoundChannel(
-                channel_id=r["channel_id"],
-                title=r["title"],
-                username=r["username"],
-                bound_by=r["bound_by"],
-                created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+        return [_row_to_channel(r) for r in rows]
 
     async def get_channel(self, channel_id: int) -> BoundChannel | None:
         async with self.connection() as db:
@@ -127,13 +192,7 @@ class Database:
             ).fetchone()
         if row is None:
             return None
-        return BoundChannel(
-            channel_id=row["channel_id"],
-            title=row["title"],
-            username=row["username"],
-            bound_by=row["bound_by"],
-            created_at=row["created_at"],
-        )
+        return _row_to_channel(row)
 
     async def delete_channel(self, channel_id: int) -> bool:
         async with self.connection() as db:
@@ -143,6 +202,43 @@ class Database:
             )
             await db.commit()
             return cursor.rowcount > 0
+
+    async def set_default_channel(self, channel_id: int) -> BoundChannel | None:
+        """Mark one channel as default (clears previous). Returns None if unknown."""
+        async with self.connection() as db:
+            exists = await (
+                await db.execute(
+                    "SELECT 1 FROM channels WHERE channel_id = ?",
+                    (channel_id,),
+                )
+            ).fetchone()
+            if exists is None:
+                return None
+            await db.execute("UPDATE channels SET is_default = 0")
+            await db.execute(
+                "UPDATE channels SET is_default = 1 WHERE channel_id = ?",
+                (channel_id,),
+            )
+            await db.commit()
+            row = await (
+                await db.execute(
+                    "SELECT * FROM channels WHERE channel_id = ?",
+                    (channel_id,),
+                )
+            ).fetchone()
+        assert row is not None
+        return _row_to_channel(row)
+
+    async def get_default_channel(self) -> BoundChannel | None:
+        async with self.connection() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM channels WHERE is_default = 1 LIMIT 1"
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_channel(row)
 
     async def set_reply_target(
         self, chat_id: int, message_id: int, set_by: int
@@ -159,3 +255,135 @@ class Database:
                 (chat_id, message_id, set_by),
             )
             await db.commit()
+
+    async def save_channel_post(
+        self,
+        *,
+        channel_id: int,
+        message_id: int,
+        date: str | None = None,
+        text: str | None = None,
+        caption: str | None = None,
+        media_type: str | None = None,
+        raw_json: str | None = None,
+    ) -> ChannelPost:
+        async with self.connection() as db:
+            await db.execute(
+                """
+                INSERT INTO channel_posts
+                    (channel_id, message_id, date, text, caption, media_type, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel_id, message_id) DO UPDATE SET
+                    date = excluded.date,
+                    text = excluded.text,
+                    caption = excluded.caption,
+                    media_type = excluded.media_type,
+                    raw_json = excluded.raw_json
+                """,
+                (channel_id, message_id, date, text, caption, media_type, raw_json),
+            )
+            await db.commit()
+            row = await (
+                await db.execute(
+                    "SELECT * FROM channel_posts WHERE channel_id = ? AND message_id = ?",
+                    (channel_id, message_id),
+                )
+            ).fetchone()
+        assert row is not None
+        return _row_to_post(row)
+
+    async def list_recent_posts(
+        self, channel_id: int | None = None, *, limit: int = 20
+    ) -> list[ChannelPost]:
+        limit = max(1, min(int(limit), 200))
+        async with self.connection() as db:
+            if channel_id is None:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM channel_posts
+                    ORDER BY datetime(COALESCE(date, created_at)) DESC, message_id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM channel_posts
+                    WHERE channel_id = ?
+                    ORDER BY datetime(COALESCE(date, created_at)) DESC, message_id DESC
+                    LIMIT ?
+                    """,
+                    (channel_id, limit),
+                )
+            rows = await cursor.fetchall()
+        return [_row_to_post(r) for r in rows]
+
+    async def get_post(
+        self, channel_id: int, message_id: int
+    ) -> ChannelPost | None:
+        async with self.connection() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM channel_posts WHERE channel_id = ? AND message_id = ?",
+                    (channel_id, message_id),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_post(row)
+
+    async def search_posts(
+        self,
+        query: str,
+        *,
+        channel_id: int | None = None,
+        limit: int = 20,
+    ) -> list[ChannelPost]:
+        limit = max(1, min(int(limit), 200))
+        pattern = f"%{query}%"
+        async with self.connection() as db:
+            if channel_id is None:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM channel_posts
+                    WHERE (text LIKE ? OR caption LIKE ?)
+                    ORDER BY datetime(COALESCE(date, created_at)) DESC, message_id DESC
+                    LIMIT ?
+                    """,
+                    (pattern, pattern, limit),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT * FROM channel_posts
+                    WHERE channel_id = ?
+                      AND (text LIKE ? OR caption LIKE ?)
+                    ORDER BY datetime(COALESCE(date, created_at)) DESC, message_id DESC
+                    LIMIT ?
+                    """,
+                    (channel_id, pattern, pattern, limit),
+                )
+            rows = await cursor.fetchall()
+        return [_row_to_post(r) for r in rows]
+
+    async def log_agent_job(
+        self,
+        action: str,
+        payload: Mapping[str, Any] | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> int:
+        async with self.connection() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO agent_jobs (action, payload_json, result_json)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    action,
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+                    json.dumps(result, ensure_ascii=False) if result is not None else None,
+                ),
+            )
+            await db.commit()
+            return int(cursor.lastrowid or 0)

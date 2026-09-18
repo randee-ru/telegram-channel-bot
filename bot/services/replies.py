@@ -94,3 +94,36 @@ async def send_reply(
             "Не удалось ответить. Для постов канала нужен доступ бота к каналу; "
             "для обсуждений — бот должен быть в группе обсуждений."
         ) from exc
+
+
+async def send_reply_text(
+    bot: Bot,
+    chat_id: int,
+    reply_to_message_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+) -> Message:
+    """Reply with plain text — for agent API / CLI."""
+    try:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_to_message_id=reply_to_message_id,
+            parse_mode=parse_mode,
+        )
+        logger.info(
+            "Replied text in chat_id=%s to message_id=%s new_msg_id=%s",
+            chat_id,
+            reply_to_message_id,
+            sent.message_id,
+        )
+        return sent
+    except TelegramAPIError as exc:
+        logger.exception(
+            "Reply text failed chat_id=%s message_id=%s", chat_id, reply_to_message_id
+        )
+        raise ReplyError(
+            "Не удалось ответить. Для постов канала нужен доступ бота к каналу; "
+            "для обсуждений — бот должен быть в группе обсуждений."
+        ) from exc

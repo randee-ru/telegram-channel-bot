@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     default_channel_id: int | None = Field(default=None, alias="DEFAULT_CHANNEL_ID")
     db_path: Path = Field(default=Path("./data/bot.db"), alias="DB_PATH")
 
+    agent_api_token: str | None = Field(default=None, alias="AGENT_API_TOKEN")
+    agent_api_port: int = Field(default=8787, alias="AGENT_API_PORT")
+    agent_api_host: str = Field(default="127.0.0.1", alias="AGENT_API_HOST")
+
     @field_validator("telegram_bot_token")
     @classmethod
     def token_must_be_nonempty(cls, value: str) -> str:
@@ -31,6 +35,14 @@ class Settings(BaseSettings):
         if not token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
         return token
+
+    @field_validator("agent_api_token", mode="before")
+    @classmethod
+    def empty_agent_token_to_none(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     @property
     def allowed_ids(self) -> frozenset[int]:
@@ -44,6 +56,10 @@ class Settings(BaseSettings):
                 continue
             result.add(int(part))
         return frozenset(result)
+
+    @property
+    def agent_api_enabled(self) -> bool:
+        return bool(self.agent_api_token)
 
     def is_allowed(self, user_id: int) -> bool:
         return user_id in self.allowed_ids

@@ -40,6 +40,9 @@ cp .env.example .env
 | `ALLOWED_USER_IDS` | да* | ID операторов через запятую, например `123456789,987654321` |
 | `DEFAULT_CHANNEL_ID` | нет | Канал по умолчанию для `/post` |
 | `DB_PATH` | нет | Путь к SQLite (по умолчанию `./data/bot.db`) |
+| `AGENT_API_TOKEN` | для HTTP API | Bearer-токен локального Agent API |
+| `AGENT_API_PORT` | нет | Порт API (по умолчанию `8787`) |
+| `AGENT_API_HOST` | нет | Хост API (по умолчанию `127.0.0.1`) |
 
 \* Без `ALLOWED_USER_IDS` все write-команды будут отклоняться.
 
@@ -82,14 +85,80 @@ bot/
   config.py          # pydantic-settings
   db.py              # aiosqlite
   main.py            # polling entrypoint
-  handlers/          # /start /bind /channels /post /reply
+  handlers/          # /start /bind /channels /post /reply + ingest
+  agent_api.py       # локальный HTTP API для агентов
   services/          # привязка, публикация, ответы, парсинг
   middlewares/       # allowlist
+tools/tgctl.py       # CLI для агентов
 tests/               # unit-тесты без живого API
 Dockerfile
 docker-compose.yml
 .env.example
 ```
+
+
+## Управление для агентов (Боря / Лилу)
+
+Программный доступ к тому же боту: публикация в личный канал, чтение сохранённых постов, инфо о канале, ответы.
+
+**Ограничение Telegram Bot API:** бот не может прокрутить всю историю канала. В SQLite попадают только посты с момента, когда бот — админ канала и получает обновления `channel_post` / `edited_channel_post` (плюс посты, опубликованные через API/CLI).
+
+### Конфиг
+
+| Переменная | Описание |
+|------------|----------|
+| `AGENT_API_TOKEN` | Секрет Bearer-токена; без него HTTP API **выключен** |
+| `AGENT_API_PORT` | Порт (по умолчанию `8787`) |
+| `AGENT_API_HOST` | Хост (по умолчанию `127.0.0.1` — только localhost) |
+
+### HTTP API (локально, вместе с ботом)
+
+Базовый URL: `http://127.0.0.1:8787`
+
+Авторизация (кроме `/health`): заголовок `Authorization: Bearer <AGENT_API_TOKEN>` или `X-Agent-Token: <AGENT_API_TOKEN>`.
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/health` | Без auth |
+| GET | `/channels` | Список привязанных каналов |
+| POST | `/channels/default` | `{"channel_id": -100...}` — канал по умолчанию |
+| GET | `/channels/info?channel_id=` | getChat + число участников |
+| POST | `/post` | `{"text":"...","channel_id":optional,"parse_mode":optional}` |
+| POST | `/reply` | `{"chat_id":...,"message_id":...,"text":"..."}` |
+| GET | `/posts?channel_id=&limit=20` | Недавние посты из SQLite |
+| GET | `/posts/search?q=&channel_id=&limit=20` | LIKE-поиск по text/caption |
+
+Токен бота в ответах **никогда** не возвращается. Ошибки — JSON `{"ok":false,"error":{"code","message"}}`.
+
+Пример:
+
+```bash
+curl -s http://127.0.0.1:8787/health
+curl -s -H "Authorization: Bearer $AGENT_API_TOKEN" http://127.0.0.1:8787/channels
+curl -s -H "Authorization: Bearer $AGENT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Привет от агента"}' \
+  http://127.0.0.1:8787/post
+```
+
+### CLI (`tools/tgctl.py`)
+
+Работает напрямую через aiogram + SQLite (не зависит от HTTP API):
+
+```bash
+cd /workspace/telegram-channel-bot
+source .venv/bin/activate
+
+python tools/tgctl.py channels
+python tools/tgctl.py set-default -1001234567890
+python tools/tgctl.py info [--channel ID]
+python tools/tgctl.py post --text "hello" [--channel ID]
+python tools/tgctl.py posts [--channel ID] [--limit 20]
+python tools/tgctl.py search "query" [--channel ID]
+python tools/tgctl.py reply --chat-id ID --message-id ID --text "..."
+```
+
+Перед публикацией через агентов: привяжите канал (`/bind` в Telegram) и при необходимости `set-default` / `POST /channels/default`. Если личного канала ещё нет в БД — нужен `channel_id` от пользователя.
 
 ## Безопасность
 

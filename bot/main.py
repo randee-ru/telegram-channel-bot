@@ -6,11 +6,13 @@ import asyncio
 import logging
 import sys
 
+from aiohttp.web import AppRunner
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from bot.agent_api import start_agent_api
 from bot.config import Settings, get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
@@ -68,9 +70,12 @@ async def main() -> None:
     dp.include_router(setup_routers())
 
     await on_startup(bot, db)
+    api_runner: AppRunner | None = await start_agent_api(bot, db, settings)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if api_runner is not None:
+            await api_runner.cleanup()
         await bot.session.close()
 
 
