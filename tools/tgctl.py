@@ -5,6 +5,8 @@ Works without the local HTTP Agent API (prefers direct aiogram + aiosqlite).
 
 Usage:
   python tools/tgctl.py channels
+  python tools/tgctl.py sources
+  python tools/tgctl.py feed [--limit N] [--chat-id ID] [--include-own]
   python tools/tgctl.py post --text "hello" [--channel ID]
   python tools/tgctl.py posts [--channel ID] [--limit 20]
   python tools/tgctl.py search "query"
@@ -220,11 +222,91 @@ async def cmd_search(
     )
 
 
+async def _own_channel_ids(db: Database, settings: Settings) -> list[int]:
+    ids: set[int] = set()
+    default = await db.get_default_channel()
+    if default is not None:
+        ids.add(default.channel_id)
+    if settings.default_channel_id is not None:
+        ids.add(settings.default_channel_id)
+    return sorted(ids)
+
+
+async def cmd_sources(db: Database, role: str | None = None) -> None:
+    chats = await db.list_watched_chats(role=role, active_only=True)
+    _print_json(
+        [
+            {
+                "chat_id": c.chat_id,
+                "chat_type": c.chat_type,
+                "title": c.title,
+                "username": c.username,
+                "role": c.role,
+                "last_message_at": c.last_message_at,
+                "added_at": c.added_at,
+                "is_active": c.is_active,
+            }
+            for c in chats
+        ]
+    )
+
+
+async def cmd_feed(
+    db: Database,
+    settings: Settings,
+    *,
+    limit: int,
+    chat_id: int | None,
+    include_own: bool,
+) -> None:
+    exclude: list[int] | None = None
+    if not include_own and chat_id is None:
+        exclude = await _own_channel_ids(db, settings)
+        if not exclude:
+            exclude = None
+    posts = await db.list_feed(
+        limit=limit, chat_id=chat_id, exclude_chat_ids=exclude
+    )
+    _print_json(
+        [
+            {
+                "id": p.id,
+                "channel_id": p.channel_id,
+                "message_id": p.message_id,
+                "date": p.date,
+                "text": p.text,
+                "caption": p.caption,
+                "media_type": p.media_type,
+                "created_at": p.created_at,
+            }
+            for p in posts
+        ]
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Telegram channel bot control for agents")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("channels", help="List bound channels")
+
+    p_sources = sub.add_parser("sources", help="List watched news sources")
+    p_sources.add_argument(
+        "--role",
+        default=None,
+        help="Filter by role (default: all active)",
+    )
+
+    p_feed = sub.add_parser(
+        "feed", help="Recent ingested posts across news sources"
+    )
+    p_feed.add_argument("--limit", type=int, default=20)
+    p_feed.add_argument("--chat-id", type=int, default=None)
+    p_feed.add_argument(
+        "--include-own",
+        action="store_true",
+        help="Include personal publish channel posts",
+    )
 
     p_post = sub.add_parser("post", help="Publish text to channel")
     p_post.add_argument("--text", required=True)
@@ -271,6 +353,18 @@ async def async_main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "channels":
             await cmd_channels(db)
+            return
+        if args.command == "sources":
+            await cmd_sources(db, role=args.role)
+            return
+        if args.command == "feed":
+            await cmd_feed(
+                db,
+                settings,
+                limit=args.limit,
+                chat_id=args.chat_id,
+                include_own=args.include_own,
+            )
             return
         if args.command == "set-default":
             await cmd_set_default(db, args.channel_id)

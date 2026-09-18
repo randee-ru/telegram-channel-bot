@@ -12,10 +12,11 @@ from bot.handlers.start import router as start_router
 
 def setup_routers() -> Router:
     root = Router(name="root")
-    root.include_router(ingest_router)
+    # Command routers first; ingest last so /commands are not swallowed.
     root.include_router(start_router)
     root.include_router(bind_router)
     root.include_router(channels_router)
     root.include_router(post_router)
     root.include_router(reply_router)
+    root.include_router(ingest_router)
     return root

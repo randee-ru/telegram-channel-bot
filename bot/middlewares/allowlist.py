@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.enums import ChatType
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot.config import Settings
@@ -33,6 +34,14 @@ class AllowlistMiddleware(BaseMiddleware):
         user = data.get("event_from_user")
         if user is None:
             return await handler(event, data)
+
+        # Group/supergroup plain messages are for ingest — do not gate or reply.
+        # Only slash-commands in groups still go through the allowlist.
+        if isinstance(event, Message) and event.chat is not None:
+            if event.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}:
+                text = event.text or ""
+                if not text.startswith("/"):
+                    return await handler(event, data)
 
         # Allow /start always
         if isinstance(event, Message) and event.text:

@@ -127,6 +127,8 @@ docker-compose.yml
 | POST | `/reply` | `{"chat_id":...,"message_id":...,"text":"..."}` |
 | GET | `/posts?channel_id=&limit=20` | Недавние посты из SQLite |
 | GET | `/posts/search?q=&channel_id=&limit=20` | LIKE-поиск по text/caption |
+| GET | `/sources` | Watched news sources |
+| GET | `/feed?limit=&chat_id=&include_own=` | Лента источников (без своего канала по умолчанию) |
 
 Токен бота в ответах **никогда** не возвращается. Ошибки — JSON `{"ok":false,"error":{"code","message"}}`.
 
@@ -150,6 +152,8 @@ cd /workspace/telegram-channel-bot
 source .venv/bin/activate
 
 python tools/tgctl.py channels
+python tools/tgctl.py sources
+python tools/tgctl.py feed [--limit 20] [--chat-id ID] [--include-own]
 python tools/tgctl.py set-default -1001234567890
 python tools/tgctl.py info [--channel ID]
 python tools/tgctl.py post --text "hello" [--channel ID]
@@ -159,6 +163,42 @@ python tools/tgctl.py reply --chat-id ID --message-id ID --text "..."
 ```
 
 Перед публикацией через агентов: привяжите канал (`/bind` в Telegram) и при необходимости `set-default` / `POST /channels/default`. Если личного канала ещё нет в БД — нужен `channel_id` от пользователя.
+
+
+## Источники новостей (группы / каналы для Lilu / Бори)
+
+Бот `@aishost_bot` можно добавить во многие группы и каналы как **источник новостей**. Сообщения сохраняются в SQLite; агенты читают ленту через CLI / HTTP API.
+
+### Настройка в BotFather и Telegram
+
+1. У [@BotFather](https://t.me/BotFather): `/setprivacy` → выберите бота → **Disable**.  
+   Иначе в группах бот видит только команды и упоминания, а не обычные сообщения.
+2. Добавьте бота в нужные **каналы** (админом, хотя бы с правом читать сообщения / постить не обязательно для ingest) и/или **группы / супергруппы**.
+3. При добавлении бот получает `my_chat_member` и записывает чат в таблицу `watched_chats` (роль `news_source`). При кике / выходе чат помечается `is_active=0`.
+4. **История до момента добавления недоступна** Bot API: в БД попадают только сообщения с момента, когда бот уже в чате (и privacy выключен для групп).
+
+Личный канал для публикации (`channels` + `is_default`, например `@randee_create`) остаётся отдельным publish-target; по умолчанию его посты **не** смешиваются с новостной лентой.
+
+### Как Lilu / Боря читают ленту
+
+```bash
+# Список источников (тип, title, last_message_at)
+python tools/tgctl.py sources
+
+# Недавние посты из источников (без личного канала)
+python tools/tgctl.py feed --limit 30
+
+# Один чат или включая свой канал
+python tools/tgctl.py feed --chat-id -100... --limit 20
+python tools/tgctl.py feed --include-own --limit 50
+```
+
+HTTP (тот же токен Agent API):
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/sources` | Watched chats (`?role=&active=1`) |
+| GET | `/feed?limit=&chat_id=&include_own=` | Лента ingest (по умолчанию без личного канала) |
 
 ## Безопасность
 

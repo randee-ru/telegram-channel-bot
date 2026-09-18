@@ -122,3 +122,40 @@ async def test_set_default(client):
     assert resp.status == 200
     data = await resp.json()
     assert data["data"]["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_sources_and_feed(client, db: Database):
+    cli, settings = client
+    headers = {"Authorization": f"Bearer {settings.agent_api_token}"}
+    await db.set_default_channel(-100111)
+    await db.upsert_watched_chat(
+        -100222,
+        chat_type="supergroup",
+        title="Feed Src",
+        username=None,
+        role="news_source",
+    )
+    await db.save_channel_post(
+        channel_id=-100111, message_id=1, text="own", media_type="text"
+    )
+    await db.save_channel_post(
+        channel_id=-100222, message_id=2, text="from source", media_type="text"
+    )
+
+    resp = await cli.get("/sources", headers=headers)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["ok"] is True
+    assert any(s["chat_id"] == -100222 for s in data["data"])
+
+    resp = await cli.get("/feed?limit=10", headers=headers)
+    assert resp.status == 200
+    feed = (await resp.json())["data"]
+    assert all(p["channel_id"] != -100111 for p in feed)
+    assert any(p["text"] == "from source" for p in feed)
+
+    resp = await cli.get("/feed?include_own=1&limit=10", headers=headers)
+    assert resp.status == 200
+    feed_all = (await resp.json())["data"]
+    assert any(p["channel_id"] == -100111 for p in feed_all)

@@ -10,7 +10,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from bot.config import Settings
-from bot.db import BoundChannel, ChannelPost, Database
+from bot.db import BoundChannel, ChannelPost, Database, WatchedChat
 from bot.services.publishing import PublishError, publish_text
 from bot.services.replies import ReplyError, send_reply_text
 
@@ -46,6 +46,30 @@ def _post_dict(post: ChannelPost, *, include_raw: bool = False) -> dict[str, Any
     if include_raw:
         data["raw_json"] = post.raw_json
     return data
+
+
+def _watched_dict(chat: WatchedChat) -> dict[str, Any]:
+    return {
+        "chat_id": chat.chat_id,
+        "chat_type": chat.chat_type,
+        "title": chat.title,
+        "username": chat.username,
+        "role": chat.role,
+        "added_at": chat.added_at,
+        "last_message_at": chat.last_message_at,
+        "is_active": chat.is_active,
+    }
+
+
+async def _own_channel_ids(db: Database, settings: Settings) -> list[int]:
+    """Personal publish targets to exclude from the news feed by default."""
+    ids: set[int] = set()
+    default = await db.get_default_channel()
+    if default is not None:
+        ids.add(default.channel_id)
+    if settings.default_channel_id is not None:
+        ids.add(settings.default_channel_id)
+    return sorted(ids)
 
 
 def _error(status: int, code: str, message: str) -> web.Response:
@@ -308,6 +332,46 @@ async def search_posts(request: web.Request) -> web.Response:
     return _ok([_post_dict(p) for p in posts])
 
 
+async def list_sources(request: web.Request) -> web.Response:
+    db: Database = request.app[DB_KEY]
+    role = request.rel_url.query.get("role")
+    active_only = request.rel_url.query.get("active", "1") != "0"
+    chats = await db.list_watched_chats(role=role, active_only=active_only)
+    return _ok([_watched_dict(c) for c in chats])
+
+
+async def list_feed(request: web.Request) -> web.Response:
+    db: Database = request.app[DB_KEY]
+    settings: Settings = request.app[SETTINGS_KEY]
+    raw_chat = request.rel_url.query.get("chat_id")
+    chat_id: int | None = None
+    if raw_chat:
+        try:
+            chat_id = int(raw_chat)
+        except ValueError:
+            return _error(400, "invalid_field", "chat_id must be an integer")
+    limit = 20
+    if request.rel_url.query.get("limit"):
+        try:
+            limit = int(request.rel_url.query["limit"])
+        except ValueError:
+            return _error(400, "invalid_field", "limit must be an integer")
+    include_own = request.rel_url.query.get("include_own", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    exclude: list[int] | None = None
+    if not include_own and chat_id is None:
+        exclude = await _own_channel_ids(db, settings)
+        if not exclude:
+            exclude = None
+    posts = await db.list_feed(
+        limit=limit, chat_id=chat_id, exclude_chat_ids=exclude
+    )
+    return _ok([_post_dict(p) for p in posts])
+
+
 def create_app(bot: Bot, db: Database, settings: Settings) -> web.Application:
     app = web.Application(middlewares=[auth_middleware])
     app[BOT_KEY] = bot
@@ -321,6 +385,8 @@ def create_app(bot: Bot, db: Database, settings: Settings) -> web.Application:
     app.router.add_post("/reply", reply_to_message)
     app.router.add_get("/posts", list_posts)
     app.router.add_get("/posts/search", search_posts)
+    app.router.add_get("/sources", list_sources)
+    app.router.add_get("/feed", list_feed)
     return app
 
 
