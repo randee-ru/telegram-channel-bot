@@ -35,6 +35,7 @@ from aiogram.exceptions import TelegramAPIError  # noqa: E402
 
 from bot.config import Settings, get_settings  # noqa: E402
 from bot.db import Database  # noqa: E402
+from bot.services.post_policy import PostPolicy, PostPolicyError  # noqa: E402
 from bot.services.publishing import PublishError, publish_text  # noqa: E402
 from bot.services.replies import ReplyError, send_reply_text  # noqa: E402
 
@@ -126,10 +127,14 @@ async def cmd_post(
     parse_mode: str | None,
 ) -> None:
     cid = await _resolve_channel(db, settings, channel_id)
+    policy = PostPolicy(db)
+    reserved_at = await policy.reserve_post(cid)
     try:
         sent = await publish_text(bot, cid, text, parse_mode=parse_mode)
     except PublishError as exc:
+        await policy.release_post(cid, reserved_at)
         raise SystemExit(exc.message) from exc
+    await policy.record_post(cid, reserved_at)
     await db.save_channel_post(
         channel_id=cid,
         message_id=sent.message_id,
@@ -383,7 +388,10 @@ async def async_main(argv: list[str] | None = None) -> None:
         if args.command == "info":
             await cmd_info(bot, db, settings, args.channel)
         elif args.command == "post":
-            await cmd_post(bot, db, settings, args.text, args.channel, args.parse_mode)
+            try:
+                await cmd_post(bot, db, settings, args.text, args.channel, args.parse_mode)
+            except PostPolicyError as exc:
+                raise SystemExit(exc.message) from exc
         elif args.command == "reply":
             await cmd_reply(
                 bot, db, args.chat_id, args.message_id, args.text, args.parse_mode

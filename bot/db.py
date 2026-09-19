@@ -160,11 +160,23 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
+                CREATE TABLE IF NOT EXISTS publish_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id INTEGER NOT NULL,
+                    posted_at TEXT NOT NULL,
+                    hour_key TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    UNIQUE(channel_id, hour_key)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_channel_posts_channel_date
                     ON channel_posts(channel_id, date DESC);
 
                 CREATE INDEX IF NOT EXISTS idx_watched_chats_role_active
                     ON watched_chats(role, is_active);
+
+                CREATE INDEX IF NOT EXISTS idx_publish_log_channel_hour
+                    ON publish_log(channel_id, hour_key);
                 """
             )
             await self._migrate(db)
@@ -576,3 +588,64 @@ class Database:
             )
             await db.commit()
             return int(cursor.lastrowid or 0)
+
+    async def publish_slot_exists(self, channel_id: int, hour_key: str) -> bool:
+        async with self.connection() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT 1 FROM publish_log
+                    WHERE channel_id = ? AND hour_key = ?
+                    LIMIT 1
+                    """,
+                    (channel_id, hour_key),
+                )
+            ).fetchone()
+        return row is not None
+
+    async def reserve_publish_slot(
+        self, channel_id: int, posted_at: str, hour_key: str
+    ) -> bool:
+        """Reserve one channel/hour slot atomically across bot processes."""
+        async with self.connection() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO publish_log (channel_id, posted_at, hour_key, status)
+                    VALUES (?, ?, ?, 'pending')
+                    """,
+                    (channel_id, posted_at, hour_key),
+                )
+            except aiosqlite.IntegrityError:
+                await db.rollback()
+                return False
+            await db.commit()
+        return True
+
+    async def record_publish(
+        self, channel_id: int, posted_at: str, hour_key: str
+    ) -> None:
+        async with self.connection() as db:
+            await db.execute(
+                """
+                INSERT INTO publish_log (channel_id, posted_at, hour_key, status)
+                VALUES (?, ?, ?, 'success')
+                ON CONFLICT(channel_id, hour_key) DO UPDATE SET
+                    posted_at = excluded.posted_at,
+                    status = 'success'
+                """,
+                (channel_id, posted_at, hour_key),
+            )
+            await db.commit()
+
+    async def release_publish_slot(self, channel_id: int, hour_key: str) -> None:
+        async with self.connection() as db:
+            await db.execute(
+                """
+                DELETE FROM publish_log
+                WHERE channel_id = ? AND hour_key = ? AND status = 'pending'
+                """,
+                (channel_id, hour_key),
+            )
+            await db.commit()

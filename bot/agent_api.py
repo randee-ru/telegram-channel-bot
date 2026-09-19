@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 
 from bot.config import Settings
 from bot.db import BoundChannel, ChannelPost, Database, WatchedChat
+from bot.services.post_policy import PostPolicy, PostPolicyError
 from bot.services.publishing import PublishError, publish_text
 from bot.services.replies import ReplyError, send_reply_text
 
@@ -217,17 +218,29 @@ async def post_to_channel(request: web.Request) -> web.Response:
         return resolved
     channel_id = resolved
     parse_mode = body.get("parse_mode")
+    policy = PostPolicy(db)
+    try:
+        reserved_at = await policy.reserve_post(channel_id)
+    except PostPolicyError as exc:
+        await db.log_agent_job(
+            "post",
+            {"channel_id": channel_id, "text_len": len(str(text))},
+            {"ok": False, "error": exc.message},
+        )
+        return _error(429, "post_policy_rejected", exc.message)
     try:
         sent = await publish_text(
             bot, channel_id, str(text), parse_mode=parse_mode
         )
     except PublishError as exc:
+        await policy.release_post(channel_id, reserved_at)
         await db.log_agent_job(
             "post",
             {"channel_id": channel_id, "text_len": len(str(text))},
             {"ok": False, "error": exc.message},
         )
         return _error(502, "publish_failed", exc.message)
+    await policy.record_post(channel_id, reserved_at)
     result = {
         "channel_id": channel_id,
         "message_id": sent.message_id,
